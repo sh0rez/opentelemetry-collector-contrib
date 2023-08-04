@@ -46,6 +46,8 @@ type prwExporter struct {
 	exporterSettings prometheusremotewrite.Settings
 }
 
+const prwWALLoggerName = "prw.wal"
+
 // newPRWExporter initializes a new prwExporter instance and sets fields accordingly.
 func newPRWExporter(cfg *Config, set exporter.CreateSettings) (*prwExporter, error) {
 	sanitizedLabels, err := validateAndSanitizeExternalLabels(cfg)
@@ -79,7 +81,7 @@ func newPRWExporter(cfg *Config, set exporter.CreateSettings) (*prwExporter, err
 		return prwe, nil
 	}
 
-	prwe.wal, err = newWAL(cfg.WAL, prwe.export)
+	prwe.wal, err = newWAL(prwe.settings.Logger.Named(prwWALLoggerName), cfg.WAL, prwe.export)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +94,7 @@ func (prwe *prwExporter) Start(ctx context.Context, host component.Host) (err er
 	if err != nil {
 		return err
 	}
-	return prwe.turnOnWALIfEnabled(contextWithLogger(ctx, prwe.settings.Logger.Named("prw.wal")))
+	return prwe.turnOnWALIfEnabled(contextWithLogger(ctx, prwe.settings.Logger.Named(prwWALLoggerName)))
 }
 
 func (prwe *prwExporter) shutdownWALIfEnabled() error {

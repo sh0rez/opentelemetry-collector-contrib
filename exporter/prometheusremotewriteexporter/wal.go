@@ -61,24 +61,22 @@ func (wc *WALConfig) truncateFrequency() time.Duration {
 	return defaultWALTruncateFrequency
 }
 
-func newWAL(walConfig *WALConfig, exportSink func(context.Context, []*prompb.WriteRequest) error) (*prweWAL, error) {
+func newWAL(logger *zap.Logger, walConfig *WALConfig, exportSink func(context.Context, []*prompb.WriteRequest) error) (*prweWAL, error) {
 	if walConfig == nil {
 		// There are cases for which the WAL can be disabled.
 		// TODO: Perhaps log that the WAL wasn't enabled.
 		return nil, errNilConfig
 	}
 
-	wal := prweWAL{
+	return &prweWAL{
 		exportSink: exportSink,
 		walConfig:  walConfig,
 		stopChan:   make(chan struct{}),
 		rNotify:    make(chan struct{}),
 		rWALIndex:  &atomic.Uint64{},
 		wWALIndex:  &atomic.Uint64{},
-		log:        zap.NewNop(),
-	}
-
-	return &wal, nil
+		log:        logger,
+	}, nil
 }
 
 func (wc *WALConfig) createWAL() (*wal.Log, string, error) {
