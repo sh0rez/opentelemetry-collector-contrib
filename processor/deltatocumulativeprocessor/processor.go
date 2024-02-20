@@ -11,8 +11,11 @@ import (
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/context/ltx"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/context/mtx"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/data"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/delta"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/metrics"
@@ -24,18 +27,18 @@ var _ processor.Metrics = (*Processor)(nil)
 type Processor struct {
 	next consumer.Metrics
 
-	log    *zap.Logger
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	nums streams.Aggregator[data.Number]
 }
 
-func newProcessor(cfg *Config, log *zap.Logger, next consumer.Metrics) *Processor {
+func newProcessor(cfg *Config, next consumer.Metrics, log *zap.Logger, meter metric.Meter) *Processor {
 	ctx, cancel := context.WithCancel(context.Background())
+	ctx = mtx.With(ctx, meter)
+	ctx = ltx.With(ctx, log)
 
 	proc := Processor{
-		log:    log,
 		ctx:    ctx,
 		cancel: cancel,
 		next:   next,

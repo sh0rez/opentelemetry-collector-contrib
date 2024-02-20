@@ -5,11 +5,14 @@ package delta // import "github.com/open-telemetry/opentelemetry-collector-contr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/otel/metric"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/context/mtx"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/data"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatocumulativeprocessor/internal/streams"
 )
@@ -18,11 +21,49 @@ type Options struct {
 	MaxStale time.Duration
 }
 
+type Metrics struct {
+	Streams metric.Int64ObservableCounter
+	Samples metric.Int64Counter
+}
+
+func metrics(meter metric.Meter) (Metrics, error) {
+	errs := new(error)
+	var (
+		tryo = try[metric.Int64ObservableCounter](errs)
+		tryi = try[metric.Int64Counter](errs)
+	)
+
+	metrics := Metrics{
+		Streams: tryo(meter.Int64ObservableCounter("streams")),
+		Samples: tryi(meter.Int64Counter("samples")),
+	}
+
+	return metrics, *errs
+}
+
+func try[T any](errs *error) func(T, error) T {
+	return func(v T, err error) T {
+		*errs = errors.Join(*errs, err)
+		return v
+	}
+}
+
 func construct[D data.Point[D]](ctx context.Context, opts Options) streams.Aggregator[D] {
 	dps := streams.EmptyMap[D]()
 	if opts.MaxStale > 0 {
 		dps = streams.ExpireAfter(ctx, dps, opts.MaxStale)
 	}
+
+	meter := mtx.From(ctx)
+	metrics, err := metrics(meter)
+	if err != nil {
+	}
+	// TODO
+
+	var metrics Metrics
+	meter := mtx.From(ctx)
+	meter.Int64ObservableCounter("tracked_streams", ObserveMap(dps))
+	samples, err := meter.Int64Counter("samples")
 
 	var (
 		acc  = Accumulator[D]{dps: dps}
