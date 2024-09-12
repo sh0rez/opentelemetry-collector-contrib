@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/gogo/protobuf/proto"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/tidwall/wal"
@@ -32,6 +31,8 @@ type prweWAL struct {
 	stopChan  chan struct{}
 	rWALIndex *atomic.Uint64
 	wWALIndex *atomic.Uint64
+
+	notify chan struct{}
 }
 
 const (
@@ -315,110 +316,66 @@ func (prwe *prweWAL) persistToWAL(requests []*prompb.WriteRequest) error {
 		batch.Write(wIndex, protoBlob)
 	}
 
+	// try to notify readPrompbFromWAL
+	select {
+	case prwe.notify <- struct{}{}:
+		// unblock if waiting for write by writing into channel
+	default:
+		// not waiting, ignore
+	}
+
 	return prwe.wal.WriteBatch(batch)
 }
 
 func (prwe *prweWAL) readPrompbFromWAL(ctx context.Context, index uint64) (wreq *prompb.WriteRequest, err error) {
-	prwe.mu.Lock()
-	defer prwe.mu.Unlock()
-
-	var protoBlob []byte
-	for i := 0; i < 12; i++ {
-		// Firstly check if we've been terminated, then exit if so.
+	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-prwe.stopChan:
-			return nil, fmt.Errorf("attempt to read from WAL after stopped")
+			return nil, fmt.Errorf("read after stop")
 		default:
 		}
 
-		if index <= 0 {
-			index = 1
-		}
-
-		if prwe.wal == nil {
-			return nil, fmt.Errorf("attempt to read from closed WAL")
-		}
-
-		protoBlob, err = prwe.wal.Read(index)
-		if err == nil { // The read succeeded.
-			req := new(prompb.WriteRequest)
-			if err = proto.Unmarshal(protoBlob, req); err != nil {
-				return nil, err
-			}
-
-			// Now increment the WAL's read index.
-			prwe.rWALIndex.Add(1)
-
-			return req, nil
-		}
-
-		if !errors.Is(err, wal.ErrNotFound) {
+		// attempt to read from possibly empty wal
+		req, err := prwe.tryRead(index)
+		if err != nil {
 			return nil, err
 		}
 
-		if index <= 1 {
-			// This could be the very first attempted read, so try again, after a small sleep.
-			time.Sleep(time.Duration(1<<i) * time.Millisecond)
-			continue
-		}
-
-		// Otherwise, we couldn't find the record, let's try watching
-		// the WAL file until perhaps there is a write to it.
-		walWatcher, werr := fsnotify.NewWatcher()
-		if werr != nil {
-			return nil, werr
-		}
-		if werr = walWatcher.Add(prwe.walPath); werr != nil {
-			return nil, werr
-		}
-
-		// Watch until perhaps there is a write to the WAL file.
-		watchCh := make(chan error)
-		wErr := err
-		go func() {
-			defer func() {
-				watchCh <- wErr
-				close(watchCh)
-				// Close the file watcher.
-				walWatcher.Close()
-			}()
-
+		// empty?
+		if errors.Is(err, wal.ErrNotFound) {
 			select {
-			case <-ctx.Done(): // If the context was cancelled, bail out ASAP.
-				wErr = ctx.Err()
-				return
-
-			case event, ok := <-walWatcher.Events:
-				if !ok {
-					return
-				}
-				switch event.Op {
-				case fsnotify.Remove:
-					// The file got deleted.
-					// TODO: Add capabilities to search for the updated file.
-				case fsnotify.Rename:
-					// Renamed, we don't have information about the renamed file's new name.
-				case fsnotify.Write:
-					// Finally a write, let's try reading again, but after some watch.
-					wErr = nil
-				}
-
-			case eerr, ok := <-walWatcher.Errors:
-				if ok {
-					wErr = eerr
-				}
+			// wait for persistToWAL() to write
+			case <-prwe.notify:
+				continue
+			// or abort on context done
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			// or abort on shutdown
+			case <-prwe.stopChan:
+				return nil, fmt.Errorf("read after stop")
 			}
-		}()
-
-		if gerr := <-watchCh; gerr != nil {
-			return nil, gerr
 		}
 
-		// Otherwise a write occurred might have occurred,
-		// and we can sleep for a little bit then try again.
-		time.Sleep(time.Duration(1<<i) * time.Millisecond)
+		return req, err
 	}
-	return nil, err
+}
+
+func (prwe *prweWAL) tryRead(index uint64) (*prompb.WriteRequest, error) {
+	prwe.mu.Lock()
+	defer prwe.mu.Unlock()
+
+	data, err := prwe.wal.Read(index)
+	if err != nil {
+		return nil, err
+	}
+
+	var req prompb.WriteRequest
+	if err := proto.Unmarshal(data, &req); err != nil {
+		return nil, err
+	}
+
+	prwe.rWALIndex.Add(1)
+	return &req, nil
 }
